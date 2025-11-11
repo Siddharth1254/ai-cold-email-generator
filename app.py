@@ -1,11 +1,43 @@
 import os
 from typing import Tuple
 
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
 from generate_email import generate_cold_email
-from email_utils import validate_email_address
+from email_utils import send_email, validate_email_address
+
+
+def _send_email_ui(receiver: str, subject: str, body: str) -> None:
+	"""Handle the email sending UI and logic."""
+	email_address = os.getenv("EMAIL_ADDRESS", "")
+	email_password = os.getenv("EMAIL_PASSWORD", "")
+	
+	if not email_address:
+		st.error("❌ EMAIL_ADDRESS not found in .env file. Please add it.")
+		return
+	
+	if not email_password:
+		st.error("❌ EMAIL_PASSWORD not found in .env file. Please add your Gmail app password.")
+		return
+	
+	with st.spinner("Sending email..."):
+		try:
+			send_email(
+				sender=email_address,
+				receiver=receiver,
+				subject=subject,
+				body=body,
+				password=email_password,
+			)
+			st.success(f"✅ Email sent successfully to {receiver}!")
+		except ValueError as e:
+			st.error(f"❌ Validation error: {e}")
+		except RuntimeError as e:
+			st.error(f"❌ {e}")
+		except Exception as e:
+			st.error(f"❌ Failed to send email: {e}")
 
 
 def main() -> None:
@@ -54,22 +86,58 @@ def main() -> None:
 					tone=tone,
 					call_to_action=call_to_action,
 				)
+			except requests.exceptions.HTTPError as e:
+				error_msg = str(e).lower()
+				if "429" in error_msg or "rate limit" in error_msg:
+					st.error("🚦 Mistral API is temporarily overloaded. Please try again in a few minutes.")
+				else:
+					st.error(f"Failed to generate email: {e}")
+				st.stop()
+			except RuntimeError as e:
+				error_msg = str(e).lower()
+				if "429" in error_msg or "rate limit" in error_msg:
+					st.error("🚦 Mistral API is temporarily overloaded. Please try again in a few minutes.")
+				else:
+					st.error(f"Failed to generate email: {e}")
+				st.stop()
 			except Exception as exc:  # noqa: BLE001
 				st.error(f"Failed to generate email: {exc}")
 				st.stop()
 
+		# Store in session state for sending later
+		st.session_state["subject"] = subject
+		st.session_state["email_body"] = body
+		st.session_state["receiver"] = prospect_email if prospect_email else ""
+
+	# Display generated email if it exists in session state
+	if st.session_state.get("subject") and st.session_state.get("email_body"):
+		st.divider()
+		st.subheader("Generated Email")
+		
+		subject = st.session_state["subject"]
+		body = st.session_state["email_body"]
+		receiver = st.session_state.get("receiver", "")
+		
 		st.subheader("Subject")
 		st.code(subject or "", language=None)
 
 		st.subheader("Email Body")
-		st.text_area("", body or "", height=300)
+		st.text_area("", body or "", height=300, key="email_body_display", disabled=True)
 
-		st.download_button(
-			label="Download as .txt",
-			data=f"Subject: {subject}\n\n{body}",
-			file_name="cold_email.txt",
-			mime="text/plain",
-		)
+		col1, col2 = st.columns(2)
+		with col1:
+			st.download_button(
+				label="📥 Download as .txt",
+				data=f"Subject: {subject}\n\n{body}",
+				file_name="cold_email.txt",
+				mime="text/plain",
+			)
+		with col2:
+			if receiver and validate_email_address(receiver):
+				if st.button("📧 Send Email", type="primary", key="send_email_btn"):
+					_send_email_ui(receiver, subject, body)
+			else:
+				st.info("💡 Enter a valid recipient email above to enable sending.")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Tuple
 
 import requests
@@ -10,8 +11,31 @@ from email_utils import parse_subject_and_body
 load_dotenv()
 
 MISTRAL_API_KEY: str | None = os.getenv("MISTRAL_API_KEY")
-MISTRAL_MODEL: str = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+MISTRAL_MODEL: str = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 MISTRAL_CHAT_URL: str = os.getenv("MISTRAL_CHAT_URL", "https://api.mistral.ai/v1/chat/completions")
+MAX_RETRIES: int = 3
+RETRY_DELAY: int = 5  # seconds
+
+
+def _make_api_request(headers: dict, payload: dict) -> requests.Response:
+	"""Make API request with retry mechanism for rate limiting (429 errors)."""
+	for attempt in range(MAX_RETRIES):
+		response = requests.post(MISTRAL_CHAT_URL, headers=headers, json=payload, timeout=30)
+		
+		if response.status_code == 429:
+			if attempt < MAX_RETRIES - 1:
+				print(f"Rate limit hit. Waiting {RETRY_DELAY} seconds before retry...")
+				time.sleep(RETRY_DELAY)
+				continue
+			else:
+				raise RuntimeError(f"Mistral API rate limit exceeded after {MAX_RETRIES} attempts: {response.text}")
+		
+		if response.status_code >= 400:
+			raise RuntimeError(f"Mistral API error {response.status_code}: {response.text}")
+		
+		return response
+	
+	raise RuntimeError(f"Failed to get successful response after {MAX_RETRIES} attempts")
 
 
 def _build_user_prompt(
@@ -79,17 +103,14 @@ def generate_cold_email(
 		},
 	]
 
-	body = {
+	payload = {
 		"model": MISTRAL_MODEL,
 		"messages": messages,
 		"temperature": 0.6,
 		"max_tokens": 600,
 	}
 
-	response = requests.post(MISTRAL_CHAT_URL, headers=headers, json=body, timeout=30)
-	if response.status_code >= 400:
-		raise RuntimeError(f"Mistral API error {response.status_code}: {response.text}")
-
+	response = _make_api_request(headers, payload)
 	data = response.json()
 	try:
 		content: str = data["choices"][0]["message"]["content"].strip()
@@ -148,11 +169,8 @@ def generate_email(company: str, role: str, sender: str, receiver: str, position
 		"max_tokens": 500,
 	}
 
-	resp = requests.post(MISTRAL_CHAT_URL, headers=headers, json=payload, timeout=30)
-	if resp.status_code >= 400:
-		raise RuntimeError(f"Mistral API error {resp.status_code}: {resp.text}")
-
-	data = resp.json()
+	response = _make_api_request(headers, payload)
+	data = response.json()
 	try:
 		content: str = data["choices"][0]["message"]["content"].strip()
 	except Exception as exc:  # noqa: BLE001
