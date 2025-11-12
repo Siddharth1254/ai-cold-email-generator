@@ -122,7 +122,14 @@ def main() -> None:
 		st.code(subject or "", language=None)
 
 		st.subheader("Email Body")
-		st.text_area("", body or "", height=300, key="email_body_display", disabled=True)
+		st.text_area(
+			"Generated Email",
+			body or "",
+			height=300,
+			key="email_body_display",
+			disabled=True,
+			label_visibility="collapsed",
+		)
 
 		col1, col2 = st.columns(2)
 		with col1:
