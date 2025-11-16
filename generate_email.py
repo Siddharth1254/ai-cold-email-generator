@@ -120,7 +120,14 @@ def generate_cold_email(
     return parse_subject_and_body(content)
 
 
-def generate_email(company: str, role: str, sender: str, receiver: str, position: str) -> dict[str, str]:
+def generate_email(
+    company: str,
+    role: str,
+    sender_email: str,
+    receiver_email: str,
+    position: str | None = None,
+    sender_name: str | None = None,
+) -> dict[str, str]:
     """Generate a professional job/internship cold email using Mistral API.
 
     Returns a dict with keys: "subject" and "body".
@@ -128,10 +135,20 @@ def generate_email(company: str, role: str, sender: str, receiver: str, position
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY is not set. Add it to your .env file.")
 
+    if not sender_name:
+        raise ValueError("sender_name is required and cannot be None or empty")
+
     headers = {
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
         "Content-Type": "application/json",
     }
+
+    position_text = f"the {position} opportunity" if position else "an opportunity"
+    signature_instruction = (
+        f"End the email with the exact signature: 'Best, {sender_name}' — "
+        "do NOT output placeholders or brackets. Use the exact sender_name value provided. "
+        "Never use '[Your Name]', '[Name]', or any placeholder text for the signature."
+    )
 
     messages = [
         {
@@ -141,6 +158,7 @@ def generate_email(company: str, role: str, sender: str, receiver: str, position
                 "personalized, and specific. Keep body under 140 words, avoid buzzwords, "
                 "and propose a simple next step (e.g., brief call or sharing a portfolio). "
                 "Do not use brackets, placeholders, or template markers. "
+                f"{signature_instruction} "
                 "Return output strictly as:\n"
                 "Subject: <one-line subject>\n\n<body paragraphs>"
             ),
@@ -148,11 +166,12 @@ def generate_email(company: str, role: str, sender: str, receiver: str, position
         {
             "role": "user",
             "content": (
-                f"Write a short, polite cold email from {sender} to {receiver} at {company} about the {role} position. "
+                f"Write a short, polite cold email from {sender_name} ({sender_email}) to {receiver_email} at {company} about the {role} position. "
                 "Avoid any brackets, placeholder phrases, or template markers. "
-                f"{sender} is pursuing the {position} opportunity at {company}, and wants to express genuine interest, "
+                f"{sender_name} is pursuing {position_text} at {company}, and wants to express genuine interest, "
                 "highlight a relevant strength, and ask for a simple next step such as a quick call. "
-                "Make sure the email feels tailored to this scenario."
+                "Make sure the email feels tailored to this scenario. "
+                f"{signature_instruction}"
             ),
         },
     ]

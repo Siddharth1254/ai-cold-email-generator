@@ -1,11 +1,10 @@
 import os
-from typing import Tuple
 
 import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-from generate_email import generate_cold_email
+from generate_email import generate_email
 from email_utils import send_email, validate_email_address
 
 
@@ -46,6 +45,18 @@ def main() -> None:
 	st.title("AI Cold Email Generator")
 	st.caption("Powered by Mistral API")
 
+	# Initialize sender_name from EMAIL_ADDRESS if not in session state
+	if "sender_name" not in st.session_state:
+		email_address = os.getenv("EMAIL_ADDRESS", "")
+		if email_address:
+			# Extract local part (before @) and capitalize first letter of each word
+			local_part = email_address.split("@")[0]
+			# Convert common formats: john.doe -> John Doe, johndoe -> Johndoe
+			sender_name_default = local_part.replace(".", " ").replace("_", " ").title()
+			st.session_state["sender_name"] = sender_name_default
+		else:
+			st.session_state["sender_name"] = ""
+
 	with st.form("cold_email_form"):
 		col1, col2 = st.columns(2)
 		with col1:
@@ -56,6 +67,11 @@ def main() -> None:
 			prospect_email: str = st.text_input("Prospect email (optional)", placeholder="jane@acme.com")
 			tone: str = st.selectbox("Tone", ["Concise", "Friendly", "Professional", "Curious"], index=0)
 			call_to_action: str = st.selectbox("Call to action", ["15-min intro call", "Reply to this email", "Try a demo", "Forward to the right person"], index=0)
+		
+		sender_name: str = st.text_input("Your full name", value=st.session_state.get("sender_name", ""), key="sender_name_input")
+		# Update session state when user changes the field
+		if sender_name:
+			st.session_state["sender_name"] = sender_name
 
 		product_description: str = st.text_area(
 			"Your product/service (what it does, key outcomes)",
@@ -71,21 +87,31 @@ def main() -> None:
 		submit: bool = st.form_submit_button("Generate email")
 
 	if submit:
-		if prospect_email and not validate_email_address(prospect_email):
-			st.error("Please enter a valid email address or leave it empty.")
+		if not prospect_email or not validate_email_address(prospect_email):
+			st.error("Please enter a valid recipient email address.")
+			st.stop()
+		
+		if not st.session_state.get("sender_name"):
+			st.error("Please enter your full name.")
+			st.stop()
+		
+		sender_email = os.getenv("EMAIL_ADDRESS", "")
+		if not sender_email:
+			st.error("EMAIL_ADDRESS not found in .env file. Please add it.")
 			st.stop()
 
 		with st.spinner("Generating with Mistral..."):
 			try:
-				subject, body = generate_cold_email(
-					company_name=company_name.strip(),
-					prospect_name=prospect_name.strip(),
-					prospect_role=prospect_role.strip(),
-					product_description=product_description.strip(),
-					pain_points=pain_points.strip(),
-					tone=tone,
-					call_to_action=call_to_action,
+				result = generate_email(
+					company=company_name.strip(),
+					role=prospect_role.strip(),
+					sender_email=sender_email,
+					receiver_email=prospect_email.strip(),
+					position=call_to_action.strip() if call_to_action else None,
+					sender_name=st.session_state.get("sender_name"),
 				)
+				subject = result["subject"]
+				body = result["body"]
 			except requests.exceptions.HTTPError as e:
 				error_msg = str(e).lower()
 				if "429" in error_msg or "rate limit" in error_msg:
