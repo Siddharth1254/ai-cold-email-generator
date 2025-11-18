@@ -6,6 +6,7 @@ import requests
 from dotenv import load_dotenv
 
 from email_utils import parse_subject_and_body
+from logger import logger
 
 
 load_dotenv()
@@ -23,18 +24,26 @@ def _make_api_request(headers: dict, payload: dict) -> requests.Response:
         response = requests.post(MISTRAL_CHAT_URL, headers=headers, json=payload, timeout=30)
 
         if response.status_code == 429:
+            logger.warning(
+                "Mistral rate limit hit (attempt %s/%s). Retrying in %s seconds.",
+                attempt + 1,
+                MAX_RETRIES,
+                RETRY_DELAY,
+            )
             if attempt < MAX_RETRIES - 1:
-                print(f"Rate limit hit. Waiting {RETRY_DELAY} seconds before retry...")
                 time.sleep(RETRY_DELAY)
                 continue
             msg = f"Mistral API rate limit exceeded after {MAX_RETRIES} attempts: {response.text}"
+            logger.error(msg)
             raise RuntimeError(msg)
 
         if response.status_code >= 400:
+            logger.error("Mistral API error %s: %s", response.status_code, response.text)
             raise RuntimeError(f"Mistral API error {response.status_code}: {response.text}")
 
         return response
 
+    logger.error("Failed to get successful response after %s attempts", MAX_RETRIES)
     raise RuntimeError(f"Failed to get successful response after {MAX_RETRIES} attempts")
 
 
@@ -69,6 +78,12 @@ def generate_cold_email(
     call_to_action: str,
 ) -> Tuple[str, str]:
     """Generate a subject and body for a cold email using Mistral Chat API."""
+    logger.info(
+        "generate_cold_email request: company=%s prospect=%s role=%s",
+        company_name,
+        prospect_name,
+        prospect_role,
+    )
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY is not set. Add it to your .env file.")
 
@@ -115,6 +130,7 @@ def generate_cold_email(
     try:
         content: str = data["choices"][0]["message"]["content"].strip()
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected response format from Mistral during cold email generation.")
         raise RuntimeError(f"Unexpected Mistral response format: {data}") from exc
 
     return parse_subject_and_body(content)
@@ -132,6 +148,13 @@ def generate_email(
 
     Returns a dict with keys: "subject" and "body".
     """
+    logger.info(
+        "generate_email request: company=%s role=%s sender=%s receiver=%s",
+        company,
+        role,
+        sender_email,
+        receiver_email,
+    )
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY is not set. Add it to your .env file.")
 
@@ -188,6 +211,7 @@ def generate_email(
     try:
         content: str = data["choices"][0]["message"]["content"].strip()
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected response format from Mistral during job email generation.")
         raise RuntimeError(f"Unexpected Mistral response format: {data}") from exc
 
     subject, body = parse_subject_and_body(content)

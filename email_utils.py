@@ -7,6 +7,8 @@ from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+from logger import logger
+
 
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
@@ -55,7 +57,7 @@ def send_email(
 	body: str,
 	password: str,
 	file: Optional[BinaryIO] = None,
-) -> None:
+) -> Tuple[bool, str]:
 	"""Send an email via Gmail SMTP with optional attachment.
 	
 	Args:
@@ -90,28 +92,39 @@ def send_email(
 	
 	if file:
 		try:
+			file.seek(0)
 			file_data = file.read()
-			part = MIMEApplication(file_data, Name=os.path.basename(file.name))
-			part["Content-Disposition"] = f'attachment; filename="{os.path.basename(file.name)}"'
+			filename = os.path.basename(getattr(file, "name", "attachment"))
+			part = MIMEApplication(file_data, Name=filename)
+			part["Content-Disposition"] = f'attachment; filename="{filename}"'
 			msg.attach(part)
+			logger.info("Attached file '%s' to outgoing email.", filename)
 		except Exception as e:
+			logger.exception("Failed to attach file to email.")
 			raise RuntimeError(f"Failed to attach file: {e}") from e
 	
+	logger.info("Sending email from %s to %s", sender, receiver)
 	try:
 		with smtplib.SMTP("smtp.gmail.com", 587) as server:
 			server.starttls()
 			server.login(sender, password)
 			server.send_message(msg)
+		return True, f"✅ Email sent successfully to {receiver}!"
 	except smtplib.SMTPAuthenticationError as e:
+		logger.exception("SMTP authentication failed for sender %s", sender)
 		raise RuntimeError(
 			"Authentication failed. Please check your email and app password."
 		) from e
 	except smtplib.SMTPRecipientsRefused as e:
+		logger.exception("SMTP recipient refused: %s", receiver)
 		raise RuntimeError(f"Invalid recipient email address: {receiver}") from e
 	except smtplib.SMTPServerDisconnected as e:
+		logger.exception("SMTP server disconnected unexpectedly.")
 		raise RuntimeError("Connection to email server lost. Please try again.") from e
 	except smtplib.SMTPException as e:
+		logger.exception("SMTP exception occurred while sending email.")
 		raise RuntimeError(f"Failed to send email: {e}") from e
 	except Exception as e:
+		logger.exception("Unexpected exception occurred while sending email.")
 		raise RuntimeError(f"Unexpected error while sending email: {e}") from e
 

@@ -6,37 +6,47 @@ from dotenv import load_dotenv
 
 from generate_email import generate_email
 from email_utils import send_email, validate_email_address
+from logger import logger
 
 
-def _send_email_ui(receiver: str, subject: str, body: str) -> None:
+def _send_email_ui(receiver: str, subject: str, body: str, file=None) -> None:
 	"""Handle the email sending UI and logic."""
 	email_address = os.getenv("EMAIL_ADDRESS", "")
 	email_password = os.getenv("EMAIL_PASSWORD", "")
 	
 	if not email_address:
+		logger.error("EMAIL_ADDRESS env var missing; cannot send email.")
 		st.error("❌ EMAIL_ADDRESS not found in .env file. Please add it.")
 		return
 	
 	if not email_password:
+		logger.error("EMAIL_PASSWORD env var missing; cannot send email.")
 		st.error("❌ EMAIL_PASSWORD not found in .env file. Please add your Gmail app password.")
 		return
 	
+	logger.info("Attempting to send email to %s", receiver)
 	with st.spinner("Sending email..."):
 		try:
-			send_email(
+			ok, message = send_email(
 				sender=email_address,
 				receiver=receiver,
 				subject=subject,
 				body=body,
 				password=email_password,
+				file=file,
 			)
-			st.success(f"✅ Email sent successfully to {receiver}!")
+			if ok:
+				logger.info("Email successfully sent to %s", receiver)
+				st.success(message or f"✅ Email sent successfully to {receiver}!")
 		except ValueError as e:
+			logger.exception("Validation error while sending email to %s", receiver)
 			st.error(f"❌ Validation error: {e}")
 		except RuntimeError as e:
+			logger.exception("Runtime error while sending email to %s", receiver)
 			st.error(f"❌ {e}")
-		except Exception as e:
-			st.error(f"❌ Failed to send email: {e}")
+		except Exception:
+			logger.exception("Unexpected failure while sending email to %s", receiver)
+			st.error("❌ Failed to send email due to an unexpected error.")
 
 
 def main() -> None:
@@ -83,6 +93,8 @@ def main() -> None:
 		st.session_state["generated_subject"] = ""
 	if "generated_body" not in st.session_state:
 		st.session_state["generated_body"] = ""
+	if "uploaded_file" not in st.session_state:
+		st.session_state["uploaded_file"] = None
 
 	left_col, right_col = st.columns(2)
 
@@ -109,7 +121,15 @@ def main() -> None:
 			prospect_role: str = st.text_input("Role / Team", placeholder="Head of Marketing")
 			position: str = st.text_input("Position (optional)", placeholder="Summer 2026 Marketing Intern")
 
-			attachment = st.file_uploader("Attachment (optional)", key="attachment")
+			uploaded_file = st.file_uploader(
+				"Attach file (optional)",
+				type=["pdf", "docx", "png", "jpg"],
+				key="attachment",
+			)
+			if uploaded_file is not None:
+				st.session_state["uploaded_file"] = uploaded_file
+			else:
+				st.session_state["uploaded_file"] = None
 
 			generate_clicked: bool = st.form_submit_button("Generate Email", type="primary")
 
@@ -141,6 +161,13 @@ def main() -> None:
 
 			with st.spinner("Generating with Mistral..."):
 				try:
+					logger.info(
+						"Generating email for company=%s, role=%s, sender=%s, receiver=%s",
+						company_name,
+						prospect_role,
+						sender_email,
+						receiver_email,
+					)
 					result = generate_email(
 						company=company_name.strip(),
 						role=prospect_role.strip(),
@@ -153,19 +180,22 @@ def main() -> None:
 					st.session_state["generated_body"] = result.get("body", "").strip()
 					st.success("Generated — edit below if needed")
 				except requests.exceptions.HTTPError as e:
+					logger.exception("HTTP error while generating email.")
 					error_msg = str(e).lower()
 					if "429" in error_msg or "rate limit" in error_msg:
 						st.error("🚦 Mistral API is temporarily overloaded. Please try again in a few minutes.")
 					else:
 						st.error(f"Failed to generate email: {e}")
 				except RuntimeError as e:
+					logger.exception("Runtime error while generating email.")
 					error_msg = str(e).lower()
 					if "429" in error_msg or "rate limit" in error_msg:
 						st.error("🚦 Mistral API is temporarily overloaded. Please try again in a few minutes.")
 					else:
 						st.error(f"Failed to generate email: {e}")
-				except Exception as exc:  # noqa: BLE001
-					st.error(f"Failed to generate email: {exc}")
+				except Exception:
+					logger.exception("Unexpected error while generating email.")
+					st.error("Failed to generate email due to an unexpected error.")
 
 	# Right column: editable subject/body and send button
 	with right_col:
@@ -182,7 +212,9 @@ def main() -> None:
 			elif not subject_value or not body_value:
 				st.error("Subject and body cannot be empty.")
 			else:
-				_send_email_ui(receiver_email, subject_value, body_value)
+				logger.info("User requested to send email to %s", receiver_email)
+				file_to_send = st.session_state.get("uploaded_file")
+				_send_email_ui(receiver_email, subject_value, body_value, file_to_send)
 
 
 if __name__ == "__main__":
