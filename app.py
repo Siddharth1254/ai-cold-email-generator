@@ -41,136 +41,148 @@ def _send_email_ui(receiver: str, subject: str, body: str) -> None:
 
 def main() -> None:
 	load_dotenv()
-	st.set_page_config(page_title="AI Cold Email Generator", page_icon="📧", layout="centered")
+	st.set_page_config(page_title="AI Cold Email Generator", page_icon="📧", layout="wide")
 	st.title("AI Cold Email Generator")
 	st.caption("Powered by Mistral API")
+
+	# Lightweight UI styling
+	st.markdown(
+		"""
+		<style>
+		.block-container {
+			padding-top: 2rem;
+			padding-bottom: 2rem;
+		}
+		.stTextInput>div>div>input,
+		.stTextArea>div>div>textarea {
+			border-radius: 6px;
+			border: 1px solid #d0d4dc;
+			padding: 0.35rem 0.6rem;
+		}
+		</style>
+		""",
+		unsafe_allow_html=True,
+	)
 
 	# Initialize sender_name from EMAIL_ADDRESS if not in session state
 	if "sender_name" not in st.session_state:
 		email_address = os.getenv("EMAIL_ADDRESS", "")
 		if email_address:
-			# Extract local part (before @) and capitalize first letter of each word
 			local_part = email_address.split("@")[0]
-			# Convert common formats: john.doe -> John Doe, johndoe -> Johndoe
 			sender_name_default = local_part.replace(".", " ").replace("_", " ").title()
 			st.session_state["sender_name"] = sender_name_default
 		else:
 			st.session_state["sender_name"] = ""
 
-	with st.form("cold_email_form"):
-		col1, col2 = st.columns(2)
-		with col1:
-			prospect_name: str = st.text_input("Prospect name", placeholder="Jane Doe")
-			company_name: str = st.text_input("Company", placeholder="Acme Inc.")
-			prospect_role: str = st.text_input("Prospect role", placeholder="Head of Marketing")
-		with col2:
-			prospect_email: str = st.text_input("Prospect email (optional)", placeholder="jane@acme.com")
-			tone: str = st.selectbox("Tone", ["Concise", "Friendly", "Professional", "Curious"], index=0)
-			call_to_action: str = st.selectbox("Call to action", ["15-min intro call", "Reply to this email", "Try a demo", "Forward to the right person"], index=0)
-		
-		sender_name: str = st.text_input("Your full name", value=st.session_state.get("sender_name", ""), key="sender_name_input")
-		# Update session state when user changes the field
-		if sender_name:
-			st.session_state["sender_name"] = sender_name
+	# Initialize sender_email and generated email session state
+	if "sender_email" not in st.session_state:
+		st.session_state["sender_email"] = os.getenv("EMAIL_ADDRESS", "")
+	if "receiver_email" not in st.session_state:
+		st.session_state["receiver_email"] = ""
+	if "generated_subject" not in st.session_state:
+		st.session_state["generated_subject"] = ""
+	if "generated_body" not in st.session_state:
+		st.session_state["generated_body"] = ""
 
-		product_description: str = st.text_area(
-			"Your product/service (what it does, key outcomes)",
-			placeholder="AI tool that personalizes cold emails to increase reply rates by 2x",
-			height=100,
-		)
-		pain_points: str = st.text_area(
-			"Prospect pains / context (optional)",
-			placeholder="Spending time on manual outreach, low reply rates, limited personalization",
-			height=100,
-		)
+	left_col, right_col = st.columns(2)
 
-		submit: bool = st.form_submit_button("Generate email")
-
-	if submit:
-		if not prospect_email or not validate_email_address(prospect_email):
-			st.error("Please enter a valid recipient email address.")
-			st.stop()
-		
-		if not st.session_state.get("sender_name"):
-			st.error("Please enter your full name.")
-			st.stop()
-		
-		sender_email = os.getenv("EMAIL_ADDRESS", "")
-		if not sender_email:
-			st.error("EMAIL_ADDRESS not found in .env file. Please add it.")
-			st.stop()
-
-		with st.spinner("Generating with Mistral..."):
-			try:
-				result = generate_email(
-					company=company_name.strip(),
-					role=prospect_role.strip(),
-					sender_email=sender_email,
-					receiver_email=prospect_email.strip(),
-					position=call_to_action.strip() if call_to_action else None,
-					sender_name=st.session_state.get("sender_name"),
-				)
-				subject = result["subject"]
-				body = result["body"]
-			except requests.exceptions.HTTPError as e:
-				error_msg = str(e).lower()
-				if "429" in error_msg or "rate limit" in error_msg:
-					st.error("🚦 Mistral API is temporarily overloaded. Please try again in a few minutes.")
-				else:
-					st.error(f"Failed to generate email: {e}")
-				st.stop()
-			except RuntimeError as e:
-				error_msg = str(e).lower()
-				if "429" in error_msg or "rate limit" in error_msg:
-					st.error("🚦 Mistral API is temporarily overloaded. Please try again in a few minutes.")
-				else:
-					st.error(f"Failed to generate email: {e}")
-				st.stop()
-			except Exception as exc:  # noqa: BLE001
-				st.error(f"Failed to generate email: {exc}")
-				st.stop()
-
-		# Store in session state for sending later
-		st.session_state["subject"] = subject
-		st.session_state["email_body"] = body
-		st.session_state["receiver"] = prospect_email if prospect_email else ""
-
-	# Display generated email if it exists in session state
-	if st.session_state.get("subject") and st.session_state.get("email_body"):
-		st.divider()
-		st.subheader("Generated Email")
-		
-		subject = st.session_state["subject"]
-		body = st.session_state["email_body"]
-		receiver = st.session_state.get("receiver", "")
-		
-		st.subheader("Subject")
-		st.code(subject or "", language=None)
-
-		st.subheader("Email Body")
-		st.text_area(
-			"Generated Email",
-			body or "",
-			height=300,
-			key="email_body_display",
-			disabled=True,
-			label_visibility="collapsed",
-		)
-
-		col1, col2 = st.columns(2)
-		with col1:
-			st.download_button(
-				label="📥 Download as .txt",
-				data=f"Subject: {subject}\n\n{body}",
-				file_name="cold_email.txt",
-				mime="text/plain",
+	# Left column: inputs and generate button
+	with left_col:
+		st.subheader("Email Details")
+		with st.form("email_form"):
+			sender_email = st.text_input(
+				"Your email",
+				value=st.session_state.get("sender_email", ""),
+				key="sender_email_input",
 			)
-		with col2:
-			if receiver and validate_email_address(receiver):
-				if st.button("📧 Send Email", type="primary", key="send_email_btn"):
-					_send_email_ui(receiver, subject, body)
+			sender_name = st.text_input(
+				"Your full name",
+				value=st.session_state.get("sender_name", ""),
+				key="sender_name_input",
+			)
+			receiver_email = st.text_input(
+				"Recipient email",
+				value=st.session_state.get("receiver_email", ""),
+				key="receiver_email_input",
+			)
+			company_name: str = st.text_input("Company", placeholder="Acme Inc.")
+			prospect_role: str = st.text_input("Role / Team", placeholder="Head of Marketing")
+			position: str = st.text_input("Position (optional)", placeholder="Summer 2026 Marketing Intern")
+
+			attachment = st.file_uploader("Attachment (optional)", key="attachment")
+
+			generate_clicked: bool = st.form_submit_button("Generate Email", type="primary")
+
+		# Persist basic fields in session state
+		st.session_state["sender_email"] = sender_email
+		st.session_state["sender_name"] = sender_name
+		st.session_state["receiver_email"] = receiver_email
+
+		if generate_clicked:
+			if not sender_email or not validate_email_address(sender_email):
+				st.error("Please enter a valid sender email address.")
+				st.stop()
+
+			if not receiver_email or not validate_email_address(receiver_email):
+				st.error("Please enter a valid recipient email address.")
+				st.stop()
+
+			if not sender_name:
+				st.error("Please enter your full name.")
+				st.stop()
+
+			if not company_name:
+				st.error("Please enter a company.")
+				st.stop()
+
+			if not prospect_role:
+				st.error("Please enter a role or team.")
+				st.stop()
+
+			with st.spinner("Generating with Mistral..."):
+				try:
+					result = generate_email(
+						company=company_name.strip(),
+						role=prospect_role.strip(),
+						sender_email=sender_email.strip(),
+						receiver_email=receiver_email.strip(),
+						position=position.strip() if position else None,
+						sender_name=sender_name.strip(),
+					)
+					st.session_state["generated_subject"] = result.get("subject", "").strip()
+					st.session_state["generated_body"] = result.get("body", "").strip()
+					st.success("Generated — edit below if needed")
+				except requests.exceptions.HTTPError as e:
+					error_msg = str(e).lower()
+					if "429" in error_msg or "rate limit" in error_msg:
+						st.error("🚦 Mistral API is temporarily overloaded. Please try again in a few minutes.")
+					else:
+						st.error(f"Failed to generate email: {e}")
+				except RuntimeError as e:
+					error_msg = str(e).lower()
+					if "429" in error_msg or "rate limit" in error_msg:
+						st.error("🚦 Mistral API is temporarily overloaded. Please try again in a few minutes.")
+					else:
+						st.error(f"Failed to generate email: {e}")
+				except Exception as exc:  # noqa: BLE001
+					st.error(f"Failed to generate email: {exc}")
+
+	# Right column: editable subject/body and send button
+	with right_col:
+		st.subheader("Preview & Send")
+
+		subject_value = st.text_input("Subject", key="generated_subject")
+		body_value = st.text_area("Email body", key="generated_body", height=300)
+
+		receiver_email = st.session_state.get("receiver_email", "")
+
+		if st.button("📧 Send Email", type="primary", key="send_email_btn"):
+			if not receiver_email or not validate_email_address(receiver_email):
+				st.error("Please enter a valid recipient email address on the left first.")
+			elif not subject_value or not body_value:
+				st.error("Subject and body cannot be empty.")
 			else:
-				st.info("💡 Enter a valid recipient email above to enable sending.")
+				_send_email_ui(receiver_email, subject_value, body_value)
 
 
 if __name__ == "__main__":
