@@ -5,7 +5,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from generate_email import generate_email
-from email_utils import send_email, validate_email_address
+from email_utils import is_valid_email, send_email
 from logger import logger
 
 
@@ -120,6 +120,18 @@ def main() -> None:
 			company_name: str = st.text_input("Company", placeholder="Acme Inc.")
 			prospect_role: str = st.text_input("Role / Team", placeholder="Head of Marketing")
 			position: str = st.text_input("Position (optional)", placeholder="Summer 2026 Marketing Intern")
+			how_found: str = st.text_input(
+				"How you found the role (optional)",
+				value=st.session_state.get("how_found", ""),
+			)
+			one_liner: str = st.text_input(
+				"Your strength (optional)",
+				value=st.session_state.get("one_liner", ""),
+			)
+			company_note: str = st.text_input(
+				"Company insight (optional)",
+				value=st.session_state.get("company_note", ""),
+			)
 
 			uploaded_file = st.file_uploader(
 				"Attach file (optional)",
@@ -134,17 +146,22 @@ def main() -> None:
 			generate_clicked: bool = st.form_submit_button("Generate Email", type="primary")
 
 		# Persist basic fields in session state
-		st.session_state["sender_email"] = sender_email
-		st.session_state["sender_name"] = sender_name
-		st.session_state["receiver_email"] = receiver_email
+		st.session_state["sender_email"] = sender_email.strip()
+		st.session_state["sender_name"] = sender_name.strip()
+		st.session_state["receiver_email"] = receiver_email.strip()
+		st.session_state["how_found"] = how_found.strip()[:200]
+		st.session_state["one_liner"] = one_liner.strip()[:200]
+		st.session_state["company_note"] = company_note.strip()[:200]
 
 		if generate_clicked:
-			if not sender_email or not validate_email_address(sender_email):
-				st.error("Please enter a valid sender email address.")
+			sender_valid, sender_error = is_valid_email(sender_email.strip())
+			if not sender_valid:
+				st.error(f"Sender email looks invalid: {sender_error}")
 				st.stop()
 
-			if not receiver_email or not validate_email_address(receiver_email):
-				st.error("Please enter a valid recipient email address.")
+			receiver_valid, receiver_error = is_valid_email(receiver_email.strip())
+			if not receiver_valid:
+				st.error(f"Recipient email looks invalid: {receiver_error}")
 				st.stop()
 
 			if not sender_name:
@@ -175,6 +192,9 @@ def main() -> None:
 						receiver_email=receiver_email.strip(),
 						position=position.strip() if position else None,
 						sender_name=sender_name.strip(),
+						how_found=st.session_state.get("how_found"),
+						one_liner=st.session_state.get("one_liner"),
+						company_note=st.session_state.get("company_note"),
 					)
 					st.session_state["generated_subject"] = result.get("subject", "").strip()
 					st.session_state["generated_body"] = result.get("body", "").strip()
@@ -207,8 +227,9 @@ def main() -> None:
 		receiver_email = st.session_state.get("receiver_email", "")
 
 		if st.button("📧 Send Email", type="primary", key="send_email_btn"):
-			if not receiver_email or not validate_email_address(receiver_email):
-				st.error("Please enter a valid recipient email address on the left first.")
+			receiver_valid, receiver_error = is_valid_email(receiver_email)
+			if not receiver_valid:
+				st.error(f"Please enter a valid recipient email address first: {receiver_error}")
 			elif not subject_value or not body_value:
 				st.error("Subject and body cannot be empty.")
 			else:

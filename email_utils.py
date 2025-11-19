@@ -7,16 +7,27 @@ from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+from email_validator import EmailNotValidError, validate_email
+
 from logger import logger
 
 
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
+def is_valid_email(email: str) -> Tuple[bool, Optional[str]]:
+	if not email or not email.strip():
+		return False, "Email address is required."
+	try:
+		validate_email(email, check_deliverability=False)
+		return True, None
+	except EmailNotValidError as exc:
+		return False, str(exc)
+
+
 def validate_email_address(email: str) -> bool:
-	if not email:
-		return False
-	return bool(_EMAIL_RE.match(email.strip()))
+	valid, _ = is_valid_email(email)
+	return valid
 
 
 def parse_subject_and_body(model_output: str) -> Tuple[str, str]:
@@ -68,14 +79,19 @@ def send_email(
 		password: Gmail app password
 		file: Optional file attachment (BinaryIO)
 	
+	Returns:
+		Tuple[bool, str]: True and success message, otherwise raises error.
+
 	Raises:
 		smtplib.SMTPException: If email sending fails
 		ValueError: If email addresses are invalid
 	"""
-	if not validate_email_address(sender):
-		raise ValueError(f"Invalid sender email address: {sender}")
-	if not validate_email_address(receiver):
-		raise ValueError(f"Invalid receiver email address: {receiver}")
+	valid_sender, sender_error = is_valid_email(sender)
+	if not valid_sender:
+		raise ValueError(f"Invalid sender email address: {sender_error}")
+	valid_receiver, receiver_error = is_valid_email(receiver)
+	if not valid_receiver:
+		raise ValueError(f"Invalid receiver email address: {receiver_error}")
 	
 	if not subject or not body:
 		raise ValueError("Subject and body cannot be empty")
