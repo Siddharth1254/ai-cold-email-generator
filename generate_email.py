@@ -1,7 +1,6 @@
 import os
 import time
 from collections import deque
-from typing import Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -25,7 +24,47 @@ CIRCUIT_BREAKER_COOLDOWN: int = 300
 _failure_timestamps: deque[float] = deque()
 _circuit_open_until: float = 0.0
 
+# API request template
+HEADERS_TEMPLATE = {
+    "Content-Type": "application/json",
+}
 
+
+# Circuit breaker helpers
+def _ensure_circuit_allows_call() -> None:
+    """Check if circuit breaker allows API call, raise if circuit is open."""
+    now = time.time()
+    if now < _circuit_open_until:
+        wait_seconds = int(_circuit_open_until - now)
+        logger.warning("Circuit breaker active; skipping LLM call for %s more seconds.", wait_seconds)
+        raise RuntimeError("LLM temporarily unavailable due to repeated failures. Please try again later.")
+
+
+def _record_failure() -> None:
+    """Record a failure and open circuit breaker if threshold is reached."""
+    global _circuit_open_until
+    now = time.time()
+    _failure_timestamps.append(now)
+    while _failure_timestamps and now - _failure_timestamps[0] > FAILURE_WINDOW_SECONDS:
+        _failure_timestamps.popleft()
+    if len(_failure_timestamps) >= FAILURE_THRESHOLD:
+        _circuit_open_until = now + CIRCUIT_BREAKER_COOLDOWN
+        _failure_timestamps.clear()
+        logger.warning(
+            "Opened LLM circuit breaker for %s seconds after %s failures within %s seconds.",
+            CIRCUIT_BREAKER_COOLDOWN,
+            FAILURE_THRESHOLD,
+            FAILURE_WINDOW_SECONDS,
+        )
+
+
+def _record_success() -> None:
+    """Clear failure timestamps on successful API call."""
+    if _failure_timestamps:
+        _failure_timestamps.clear()
+
+
+# API request helpers
 def _make_api_request(headers: dict, payload: dict) -> requests.Response:
     """Make API request with retry mechanism for rate limiting (429 errors)."""
     for attempt in range(MAX_RETRIES):
@@ -55,37 +94,8 @@ def _make_api_request(headers: dict, payload: dict) -> requests.Response:
     raise RuntimeError(f"Failed to get successful response after {MAX_RETRIES} attempts")
 
 
-def _ensure_circuit_allows_call() -> None:
-    now = time.time()
-    if now < _circuit_open_until:
-        wait_seconds = int(_circuit_open_until - now)
-        logger.warning("Circuit breaker active; skipping LLM call for %s more seconds.", wait_seconds)
-        raise RuntimeError("LLM temporarily unavailable due to repeated failures. Please try again later.")
-
-
-def _record_failure() -> None:
-    global _circuit_open_until
-    now = time.time()
-    _failure_timestamps.append(now)
-    while _failure_timestamps and now - _failure_timestamps[0] > FAILURE_WINDOW_SECONDS:
-        _failure_timestamps.popleft()
-    if len(_failure_timestamps) >= FAILURE_THRESHOLD:
-        _circuit_open_until = now + CIRCUIT_BREAKER_COOLDOWN
-        _failure_timestamps.clear()
-        logger.warning(
-            "Opened LLM circuit breaker for %s seconds after %s failures within %s seconds.",
-            CIRCUIT_BREAKER_COOLDOWN,
-            FAILURE_THRESHOLD,
-            FAILURE_WINDOW_SECONDS,
-        )
-
-
-def _record_success() -> None:
-    if _failure_timestamps:
-        _failure_timestamps.clear()
-
-
 def _invoke_with_fallback(headers: dict, payload: dict) -> requests.Response:
+    """Invoke API with fallback model on failure."""
     _ensure_circuit_allows_call()
     try:
         response = _make_api_request(headers, payload)
@@ -110,102 +120,173 @@ def _invoke_with_fallback(headers: dict, payload: dict) -> requests.Response:
         raise
 
 
+# Prompt helper functions
+def _system_prompt(sender_name: str) -> str:
+    """Return clean system instructions controlling tone, structure, constraints."""
+    return f"""You write concise, polite job/internship outreach emails that are professional, personalized, and specific.
+
+Requirements:
+• Keep body under 140 words
+• Emails must sound confident, concise, and mature
+• Avoid "soft" language like "just reaching out", "hope you're doing well", or anything apologetic
+• No generic compliments such as "your company is amazing"
+• Prioritize clarity over friendliness; polite but not chummy
+• Use short sentences. Avoid long intros. No fluff
+• Propose a simple next step (e.g., brief call or sharing a portfolio)
+• Maximum 2 short paragraphs
+• Do not use brackets, placeholders, or template markers
+• End the email with the exact signature: 'Best, {sender_name}' — do NOT output placeholders or brackets. Use the exact sender_name value provided. Never use '[Your Name]', '[Name]', or any placeholder text for the signature.
+
+Guardrails:
+• Do not invent roles, skills, or achievements that were not provided
+• Do not fabricate details
+• If information is missing, omit it without guessing
+• Never output placeholders like [Name], [Company], or template markers
+• If sender skills/achievements are not provided, do not describe them
+• If company details are not provided, do not invent them
+• If role responsibilities are unknown, do not state them
+
+Ban these generic phrases:
+• "I hope you are doing well"
+• "I am writing to express"
+• "I would love the opportunity"
+• "Passionate"
+• "Dynamic"
+• "Innovative company"
+• Any filler corporate jargon
+
+Replace generic statements with specific, factual lines.
+
+Subject line rules:
+Subject lines must follow ONE of these patterns:
+• "Quick question about <ROLE>"
+• "<COMPANY>: regarding <ROLE>"
+• "<ROLE> — brief note"
+• "Intro from <SENDER_NAME>"
+
+Constraints:
+• 3 to 7 words
+• No emojis
+• No placeholders
+• No hype words like "Exciting opportunity"
+
+CTA rules:
+CTA must be one of these:
+• Ask for a 10-minute call
+• Offer to share portfolio/github
+• Ask who the correct contact is
+
+CTA must be in the final paragraph only.
+CTA must be a single sentence.
+
+Output format:
+Subject: <one-line subject>
+
+<body paragraphs>"""
+
+
+def _user_prompt(
+    sender_name: str,
+    sender_email: str,
+    receiver_email: str,
+    company: str,
+    role: str,
+    position: str | None,
+    how_found: str | None,
+    one_liner: str | None,
+    company_note: str | None,
+) -> str:
+    """Return user-specific structured email context with optional fields included only when present."""
+    lines = [
+        "Write a short, polite cold email with the following details:",
+        "",
+        "Sender name:",
+        sender_name,
+        "",
+        "Sender email:",
+        sender_email,
+        "",
+        "Recipient email:",
+        receiver_email,
+        "",
+        "Company:",
+        company,
+        "",
+        "Role:",
+        role,
+    ]
+    
+    if position:
+        lines.extend([
+            "",
+            "Position:",
+            position,
+        ])
+    
+    optional_details = _format_optional_details(how_found, one_liner, company_note)
+    if optional_details:
+        lines.extend([
+            "",
+            optional_details,
+        ])
+    
+    lines.extend([
+        "",
+        "Email structure:",
+        "1. One-sentence opening with purpose",
+        "2. One short paragraph with personalization",
+        "3. One short paragraph with the sender's relevant strength",
+        "4. One-sentence CTA",
+        "5. Signature",
+        "",
+        "Each section must be separated by a blank line.",
+        "",
+        "Personalization rules:",
+        "• Only include optional fields if they fit naturally",
+        "• Do not force details into the first sentence",
+        "• Company insight should be 1 sentence max",
+        "• One-liner (strength) must be integrated into the body, not the subject line",
+        "• \"How found\" must appear late in the email, never in the opening line",
+        "",
+        "Make sure the email feels tailored to this scenario and expresses genuine interest.",
+    ])
+    
+    return "\n".join(lines)
+
+
 def _sanitize_optional_field(value: str | None) -> str | None:
+    """Sanitize optional field: strip and limit to 200 characters."""
     if not value:
         return None
     sanitized = value.strip()[:200]
     return sanitized or None
 
 
-def _build_user_prompt(
-    company_name: str,
-    prospect_name: str,
-    prospect_role: str,
-    product_description: str,
-    pain_points: str,
-    tone: str,
-    call_to_action: str,
+def _format_optional_details(
+    how_found: str | None,
+    one_liner: str | None,
+    company_note: str | None,
 ) -> str:
-    sections: list[str] = [
-        f"Company: {company_name}",
-        f"Prospect: {prospect_name} ({prospect_role})",
-        f"Product: {product_description}",
-        f"Tone: {tone}",
-        f"CTA: {call_to_action}",
-    ]
-    if pain_points:
-        sections.append(f"Prospect pains: {pain_points}")
-    return "\n".join(sections)
+    """Format optional details into a structured block.
+    
+    Returns a formatted string with bullet points for existing fields,
+    or empty string if no fields are provided.
+    """
+    details = []
+    if company_note:
+        details.append(f"- Company insight: {company_note}")
+    if one_liner:
+        details.append(f"- Highlight: {one_liner}")
+    if how_found:
+        details.append(f"- How found: {how_found}")
+    
+    if not details:
+        return ""
+    
+    return "Extra details:\n" + "\n".join(details)
 
 
-def generate_cold_email(
-    company_name: str,
-    prospect_name: str,
-    prospect_role: str,
-    product_description: str,
-    pain_points: str,
-    tone: str,
-    call_to_action: str,
-) -> Tuple[str, str]:
-    """Generate a subject and body for a cold email using Mistral Chat API."""
-    logger.info(
-        "generate_cold_email request: company=%s prospect=%s role=%s",
-        company_name,
-        prospect_name,
-        prospect_role,
-    )
-    if not MISTRAL_API_KEY:
-        raise RuntimeError("MISTRAL_API_KEY is not set. Add it to your .env file.")
-
-    headers = {
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an expert SDR helping craft short, high-conversion cold emails. "
-                "Return output in this exact format:\n"
-                "Subject: <one-line subject>\n\n<body paragraphs>"
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "Write a first-touch cold email based on the following context. "
-                "Keep it under 120 words, personalize naturally, avoid fluff, and end with the CTA.\n\n"
-                + _build_user_prompt(
-                    company_name=company_name,
-                    prospect_name=prospect_name,
-                    prospect_role=prospect_role,
-                    product_description=product_description,
-                    pain_points=pain_points,
-                    tone=tone,
-                    call_to_action=call_to_action,
-                )
-            ),
-        },
-    ]
-
-    payload = {
-        "model": MISTRAL_MODEL,
-        "messages": messages,
-        "temperature": 0.6,
-        "max_tokens": 600,
-    }
-
-    response = _invoke_with_fallback(headers, payload)
-    data = response.json()
-    try:
-        content: str = data["choices"][0]["message"]["content"].strip()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Unexpected response format from Mistral during cold email generation.")
-        raise RuntimeError(f"Unexpected Mistral response format: {data}") from exc
-
-    return parse_subject_and_body(content)
-
-
+# Main generation function
 def generate_email(
     company: str,
     role: str,
@@ -239,54 +320,24 @@ def generate_email(
     company_note = _sanitize_optional_field(company_note)
 
     headers = {
+        **HEADERS_TEMPLATE,
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json",
     }
 
-    position_text = f"the {position} opportunity" if position else "an opportunity"
-    details_parts: list[str] = []
-    if company_note:
-        note = company_note.strip()[:200]
-        if note:
-            details_parts.append(f"Include this company insight: {note}. ")
-    if one_liner:
-        strength = one_liner.strip()[:200]
-        if strength:
-            details_parts.append(f"Highlight this strength: {strength}. ")
-    if how_found:
-        found = how_found.strip()[:200]
-        if found:
-            details_parts.append(f"Mention how the sender found the opportunity: {found}. ")
-    details_string = "".join(details_parts)
-    signature_instruction = (
-        f"End the email with the exact signature: 'Best, {sender_name}' — "
-        "do NOT output placeholders or brackets. Use the exact sender_name value provided. "
-        "Never use '[Your Name]', '[Name]', or any placeholder text for the signature."
-    )
-
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You write concise, polite job/internship outreach emails that are professional, "
-                "personalized, and specific. Keep body under 140 words, avoid buzzwords, "
-                "and propose a simple next step (e.g., brief call or sharing a portfolio). "
-                "Do not use brackets, placeholders, or template markers. "
-                f"{signature_instruction} "
-                "Return output strictly as:\n"
-                "Subject: <one-line subject>\n\n<body paragraphs>"
-            ),
-        },
+        {"role": "system", "content": _system_prompt(sender_name)},
         {
             "role": "user",
-            "content": (
-                f"Write a short, polite cold email from {sender_name} ({sender_email}) to {receiver_email} at {company} about the {role} position. "
-                "Avoid any brackets, placeholder phrases, or template markers. "
-                f"{sender_name} is pursuing {position_text} at {company}, and wants to express genuine interest, "
-                "highlight a relevant strength, and ask for a simple next step such as a quick call. "
-                f"{details_string}"
-                "Make sure the email feels tailored to this scenario. "
-                f"{signature_instruction}"
+            "content": _user_prompt(
+                sender_name=sender_name,
+                sender_email=sender_email,
+                receiver_email=receiver_email,
+                company=company,
+                role=role,
+                position=position,
+                how_found=how_found,
+                one_liner=one_liner,
+                company_note=company_note,
             ),
         },
     ]
@@ -294,8 +345,8 @@ def generate_email(
     payload = {
         "model": MISTRAL_MODEL,
         "messages": messages,
-        "temperature": 0.5,
-        "max_tokens": 500,
+        "temperature": 0.4,
+        "max_tokens": 450,
     }
 
     response = _invoke_with_fallback(headers, payload)
