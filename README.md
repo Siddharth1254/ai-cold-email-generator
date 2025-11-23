@@ -2,7 +2,7 @@
 # ai-cold-email-generator-agent
 
 
-A fast, polished AI-powered outreach tool that helps users generate, edit, personalize, and send high-quality cold emails—without touching a single template. Built with **Mistral**, **Streamlit**, and a clean modular architecture.
+A fast, polished AI-powered outreach tool that helps users generate, edit, personalize, and send high-quality cold emails—without touching a single template. Built with **Mistral**, **Chat GPT**, **Streamlit**, **Cursor** and a clean modular architecture.
 
 This project focuses on **real personalization**, **tone control**, and **a built-in analytics dashboard** that tracks email generation/sending statistics.
 
