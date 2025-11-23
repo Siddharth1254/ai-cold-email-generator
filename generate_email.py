@@ -195,6 +195,7 @@ def _user_prompt(
     how_found: str | None,
     one_liner: str | None,
     company_note: str | None,
+    tone: str = "Formal",
 ) -> str:
     """Return user-specific structured email context with optional fields included only when present."""
     lines = [
@@ -248,6 +249,8 @@ def _user_prompt(
         "• One-liner (strength) must be integrated into the body, not the subject line",
         "• \"How found\" must appear late in the email, never in the opening line",
         "",
+        f"Tone selected: {tone}. Use this tone consistently.",
+        "",
         "Make sure the email feels tailored to this scenario and expresses genuine interest.",
     ])
     
@@ -297,6 +300,7 @@ def generate_email(
     how_found: str | None = None,
     one_liner: str | None = None,
     company_note: str | None = None,
+    tone: str = "Formal",
 ) -> dict[str, str]:
     """Generate a professional job/internship cold email using Mistral API.
 
@@ -338,6 +342,7 @@ def generate_email(
                 how_found=how_found,
                 one_liner=one_liner,
                 company_note=company_note,
+                tone=tone,
             ),
         },
     ]
@@ -358,5 +363,6 @@ def generate_email(
         raise RuntimeError(f"Unexpected Mistral response format: {data}") from exc
 
     subject, body = parse_subject_and_body(content)
+    logger.info(f"Email generated | tone={tone}")
     return {"subject": subject, "body": body}
 

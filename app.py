@@ -1,4 +1,7 @@
 import os
+import re
+from collections import Counter
+from datetime import datetime, timedelta
 
 import requests
 import streamlit as st
@@ -9,7 +12,98 @@ from email_utils import is_valid_email, send_email
 from logger import logger
 
 
-def _send_email_ui(receiver: str, subject: str, body: str, file=None) -> None:
+def _parse_analytics_from_logs(log_file_path: str = "logs/app.log") -> dict:
+	"""Parse log file and extract analytics metrics.
+	
+	Returns a dictionary with:
+	- total_emails_generated: int
+	- total_emails_sent: int
+	- emails_sent_today: int
+	- emails_sent_this_week: int
+	- tone_usage: dict[str, int] (defaults to empty if not found in logs)
+	- top_companies: list[tuple[str, int]] (company name, count)
+	"""
+	metrics = {
+		"total_emails_generated": 0,
+		"total_emails_sent": 0,
+		"emails_sent_today": 0,
+		"emails_sent_this_week": 0,
+		"tone_usage": {"Formal": 0, "Friendly": 0, "Startup": 0},
+		"top_companies": [],
+	}
+	
+	if not os.path.exists(log_file_path):
+		return metrics
+	
+	now = datetime.now()
+	today = now.date()
+	week_ago = now - timedelta(days=7)
+	
+	companies = []
+	tone_counts = {"Formal": 0, "Friendly": 0, "Startup": 0}
+	
+	try:
+		with open(log_file_path, "r", encoding="utf-8") as f:
+			for line in f:
+				# Parse date from log line (format: YYYY-MM-DD HH:MM:SS,mmm)
+				date_match = re.match(r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", line)
+				if date_match:
+					date_str = date_match.group(1)
+					time_str = date_match.group(2)
+					try:
+						log_date = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S").date()
+						log_datetime = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+					except ValueError:
+						continue
+				else:
+					continue
+				
+				# Count email generations
+				if "Generating email for company=" in line:
+					metrics["total_emails_generated"] += 1
+					# Extract company name
+					company_match = re.search(r"company=([^,]+)", line)
+					if company_match:
+						company = company_match.group(1).strip()
+						companies.append(company)
+				
+				# Count email sends
+				if "Email successfully sent to" in line or "Email sent |" in line:
+					metrics["total_emails_sent"] += 1
+					if log_date == today:
+						metrics["emails_sent_today"] += 1
+					if log_datetime >= week_ago:
+						metrics["emails_sent_this_week"] += 1
+				
+				# Extract tone from log lines
+				if "tone=" in line:
+					tone_match = re.search(r"tone=([^|\s]+)", line)
+					if tone_match:
+						tone = tone_match.group(1).strip()
+						# Initialize tone if not in dict, then increment
+						if tone not in tone_counts:
+							tone_counts[tone] = 0
+						tone_counts[tone] += 1
+		
+		# Count top companies
+		company_counts = Counter(companies)
+		metrics["top_companies"] = company_counts.most_common(10)
+		
+		# Update tone_usage with parsed counts, ensuring all default tones are present
+		for default_tone in metrics["tone_usage"]:
+			metrics["tone_usage"][default_tone] = tone_counts.get(default_tone, 0)
+		# Also include any additional tones found in logs
+		for tone, count in tone_counts.items():
+			if tone not in metrics["tone_usage"]:
+				metrics["tone_usage"][tone] = count
+		
+	except Exception as e:
+		logger.exception("Error parsing analytics from log file: %s", e)
+	
+	return metrics
+
+
+def _send_email_ui(receiver: str, subject: str, body: str, file=None, tone: str = "Formal") -> None:
 	"""Handle the email sending UI and logic."""
 	email_address = os.getenv("EMAIL_ADDRESS", "")
 	email_password = os.getenv("EMAIL_PASSWORD", "")
@@ -36,7 +130,7 @@ def _send_email_ui(receiver: str, subject: str, body: str, file=None) -> None:
 				file=file,
 			)
 			if ok:
-				logger.info("Email successfully sent to %s", receiver)
+				logger.info(f"Email sent | tone={tone} | recipient={receiver}")
 				st.success(message or f"✅ Email sent successfully to {receiver}!")
 		except ValueError as e:
 			logger.exception("Validation error while sending email to %s", receiver)
@@ -49,96 +143,8 @@ def _send_email_ui(receiver: str, subject: str, body: str, file=None) -> None:
 			st.error("❌ Failed to send email due to an unexpected error.")
 
 
-def main() -> None:
-	load_dotenv()
-	st.set_page_config(page_title="AI Cold Email Generator", page_icon="📧", layout="wide")
-	
-	# Enhanced UI styling
-	st.markdown(
-		"""
-		<style>
-		.block-container {
-			padding-top: 3rem;
-			padding-bottom: 3rem;
-		}
-		.stTextInput>div>div>input,
-		.stTextArea>div>div>textarea {
-			border-radius: 8px;
-			border: 1px solid #d0d4dc;
-			padding: 0.5rem 0.75rem;
-		}
-		[data-testid="stExpander"] {
-			border: 1px solid #e0e4e8;
-			border-radius: 8px;
-			padding: 0.5rem;
-			margin-bottom: 1rem;
-		}
-		.main-header {
-			display: flex;
-			justify-content: space-between;
-			align-items: center;
-			padding: 1.5rem 0;
-			border-bottom: 2px solid #e0e4e8;
-			margin-bottom: 2rem;
-		}
-		.header-left h1 {
-			margin: 0;
-			font-size: 2rem;
-		}
-		.header-left p {
-			margin: 0.25rem 0 0 0;
-			color: #666;
-		}
-		.github-link {
-			padding: 0.5rem 1rem;
-			background-color: #f0f0f0;
-			border-radius: 6px;
-			text-decoration: none;
-			color: #333;
-			font-size: 0.9rem;
-		}
-		.github-link:hover {
-			background-color: #e0e0e0;
-		}
-		.generate-button-container {
-			margin-top: 2rem;
-			padding: 1rem;
-			background-color: #f8f9fa;
-			border-radius: 8px;
-			border: 1px solid #e0e4e8;
-		}
-		.placeholder-container {
-			display: flex;
-			flex-direction: column;
-			align-items: center;
-			justify-content: center;
-			padding: 4rem 2rem;
-			text-align: center;
-			color: #888;
-		}
-		.placeholder-icon {
-			font-size: 4rem;
-			margin-bottom: 1rem;
-		}
-		</style>
-		""",
-		unsafe_allow_html=True,
-	)
-	
-	# Header bar
-	st.markdown(
-		"""
-		<div class="main-header">
-			<div class="header-left">
-				<h1>📧 AI Cold Email Generator</h1>
-				<p>Powered by Mistral API</p>
-			</div>
-			<a href="https://github.com" target="_blank" class="github-link">View on GitHub</a>
-		</div>
-		""",
-		unsafe_allow_html=True,
-	)
-
+def _render_email_generator() -> None:
+	"""Render the email generator UI page."""
 	# Initialize sender_name from EMAIL_ADDRESS if not in session state
 	if "sender_name" not in st.session_state:
 		email_address = os.getenv("EMAIL_ADDRESS", "")
@@ -166,11 +172,38 @@ def main() -> None:
 		st.session_state["one_liner"] = ""
 	if "company_note" not in st.session_state:
 		st.session_state["company_note"] = ""
+	if "tone" not in st.session_state:
+		st.session_state["tone"] = "Formal"
 
 	left_col, right_col = st.columns([4, 6], gap="large")
 
 	# Left column: inputs and generate button
 	with left_col:
+		# Tone Selector
+		st.markdown("### Tone:")
+		
+		current_tone = st.session_state.get("tone", "Formal")
+		
+		st.markdown(f"""
+		<div class="tone-wrapper">
+			<button class="tone-btn {'selected' if current_tone=='Formal' else ''}" onclick="sendTone('Formal')">Formal</button>
+			<button class="tone-btn {'selected' if current_tone=='Friendly' else ''}" onclick="sendTone('Friendly')">Friendly</button>
+			<button class="tone-btn {'selected' if current_tone=='Startup' else ''}" onclick="sendTone('Startup')">Startup</button>
+		</div>
+		
+		<script>
+		function sendTone(value) {{
+			fetch("/?tone=" + value)
+				.then(() => window.parent.location.reload());
+		}}
+		</script>
+		""", unsafe_allow_html=True)
+		
+		# Capture tone from query params
+		query_params = st.experimental_get_query_params()
+		if "tone" in query_params:
+			st.session_state["tone"] = query_params["tone"][0]
+		
 		with st.form("email_form"):
 			# Sender Details
 			with st.expander("👤 Sender Details", expanded=True):
@@ -287,6 +320,7 @@ def main() -> None:
 						how_found=how_found.strip() if how_found else None,
 						one_liner=one_liner.strip() if one_liner else None,
 						company_note=company_note.strip() if company_note else None,
+						tone=st.session_state.get("tone", "Formal"),
 					)
 					st.session_state["generated_subject"] = result.get("subject", "").strip()
 					st.session_state["generated_body"] = result.get("body", "").strip()
@@ -355,13 +389,209 @@ def main() -> None:
 				else:
 					logger.info("User requested to send email to %s", receiver_email)
 					file_to_send = st.session_state.get("uploaded_file")
-					_send_email_ui(receiver_email, current_subject, current_body, file_to_send)
+					current_tone = st.session_state.get("tone", "Formal")
+					_send_email_ui(receiver_email, current_subject, current_body, file_to_send, tone=current_tone)
 			
 			if not can_send:
 				if not receiver_email:
 					st.info("💡 Enter a recipient email address on the left to enable sending.")
 				elif not current_subject or not current_body:
 					st.info("💡 Subject and body must be filled to send the email.")
+
+
+def _render_analytics_dashboard() -> None:
+	"""Render the analytics dashboard page."""
+	st.title("📊 Analytics Dashboard")
+	
+	# Try to read analytics.json first, then fall back to logs/app.log
+	analytics_file = "analytics.json"
+	log_file = "logs/app.log"
+	
+	metrics = None
+	if os.path.exists(analytics_file):
+		try:
+			import json
+			with open(analytics_file, "r", encoding="utf-8") as f:
+				metrics = json.load(f)
+		except Exception as e:
+			logger.exception("Error reading analytics.json: %s", e)
+	
+	# If analytics.json doesn't exist or failed to read, parse from logs
+	if metrics is None:
+		metrics = _parse_analytics_from_logs(log_file)
+	
+	# Display key metrics
+	st.subheader("📈 Key Metrics")
+	col1, col2, col3, col4 = st.columns(4)
+	
+	with col1:
+		st.metric("Total Emails Generated", metrics["total_emails_generated"])
+	with col2:
+		st.metric("Total Emails Sent", metrics["total_emails_sent"])
+	with col3:
+		st.metric("Emails Sent Today", metrics["emails_sent_today"])
+	with col4:
+		st.metric("Emails Sent This Week", metrics["emails_sent_this_week"])
+	
+	# Tone usage chart
+	st.subheader("🎨 Tone Usage")
+	tone_data = metrics.get("tone_usage", {})
+	if tone_data and any(tone_data.values()):
+		# Convert to dict format for bar chart (Streamlit accepts dict directly)
+		st.bar_chart(tone_data)
+	else:
+		st.info("No tone usage data available yet.")
+	
+	# Top companies
+	st.subheader("🏢 Top Companies Contacted")
+	top_companies = metrics.get("top_companies", [])
+	if top_companies:
+		# Convert list of tuples to list of dicts for dataframe
+		companies_data = [{"Company": company, "Count": count} for company, count in top_companies]
+		st.dataframe(companies_data, use_container_width=True, hide_index=True)
+	else:
+		st.info("No company data available yet.")
+
+
+def main() -> None:
+	load_dotenv()
+	st.set_page_config(page_title="AI Cold Email Generator", page_icon="📧", layout="wide")
+	
+	# Enhanced UI styling
+	st.markdown(
+		"""
+		<style>
+		.block-container {
+			padding-top: 3rem;
+			padding-bottom: 3rem;
+		}
+		.stTextInput>div>div>input,
+		.stTextArea>div>div>textarea {
+			border-radius: 8px;
+			border: 1px solid #d0d4dc;
+			padding: 0.5rem 0.75rem;
+		}
+		[data-testid="stExpander"] {
+			border: 1px solid #e0e4e8;
+			border-radius: 8px;
+			padding: 0.5rem;
+			margin-bottom: 1rem;
+		}
+		.main-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			padding: 1.5rem 0;
+			border-bottom: 2px solid #e0e4e8;
+			margin-bottom: 2rem;
+		}
+		.header-left h1 {
+			margin: 0;
+			font-size: 2rem;
+		}
+		.header-left p {
+			margin: 0.25rem 0 0 0;
+			color: #666;
+		}
+		.github-link {
+			padding: 0.5rem 1rem;
+			background-color: #f0f0f0;
+			border-radius: 6px;
+			text-decoration: none;
+			color: #333;
+			font-size: 0.9rem;
+		}
+		.github-link:hover {
+			background-color: #e0e0e0;
+		}
+		.generate-button-container {
+			margin-top: 2rem;
+			padding: 1rem;
+			background-color: #f8f9fa;
+			border-radius: 8px;
+			border: 1px solid #e0e4e8;
+		}
+		.placeholder-container {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			padding: 4rem 2rem;
+			text-align: center;
+			color: #888;
+		}
+		.placeholder-icon {
+			font-size: 4rem;
+			margin-bottom: 1rem;
+		}
+		/* Sidebar hamburger button styling */
+		[data-testid="stSidebar"] [data-testid="stHeader"] button {
+			padding: 0.5rem;
+			width: 2rem;
+			height: 2rem;
+			border: none;
+			background-color: transparent;
+		}
+		[data-testid="stSidebar"] [data-testid="stHeader"] button:hover {
+			background-color: #f0f0f0;
+			border-radius: 4px;
+		}
+		.tone-wrapper {
+			display: flex;
+			gap: 0.8rem;
+			padding: 0.5rem 0;
+		}
+		.tone-btn {
+			border-radius: 9999px;
+			padding: 0.5rem 1.4rem;
+			font-size: 0.95rem;
+			border: 1px solid #ddd;
+			background: #f5f5f5;
+			cursor: pointer;
+			transition: all 0.2s ease;
+		}
+		.tone-btn:hover {
+			background: #e9e9e9;
+			transform: translateY(-2px);
+		}
+		.tone-btn.selected {
+			background: #4a90e2 !important;
+			color: white !important;
+			border-color: #357abd !important;
+			transform: translateY(-2px);
+			font-weight: 600;
+			box-shadow: 0 3px 8px rgba(74,144,226,0.35);
+		}
+		</style>
+		""",
+		unsafe_allow_html=True,
+	)
+	
+	# Sidebar navigation
+	page = st.sidebar.radio(
+		"Navigation",
+		["Email Generator", "Analytics Dashboard"],
+		label_visibility="collapsed",
+	)
+	
+	# Route to appropriate page
+	if page == "Email Generator":
+		# Header bar
+		st.markdown(
+			"""
+			<div class="main-header">
+				<div class="header-left">
+					<h1>📧 AI Cold Email Generator</h1>
+					<p>Powered by Mistral API</p>
+				</div>
+				<a href="https://github.com" target="_blank" class="github-link">View on GitHub</a>
+			</div>
+			""",
+			unsafe_allow_html=True,
+		)
+		_render_email_generator()
+	elif page == "Analytics Dashboard":
+		_render_analytics_dashboard()
 
 
 if __name__ == "__main__":
