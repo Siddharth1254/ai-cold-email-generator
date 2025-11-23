@@ -126,7 +126,7 @@ venv\Scripts\activate        # Windows
 
 ```bash
 pip install -r requirements.txt
-
+```
 
 ### **4. Generate Your Gmail App Password (Required)**
 
@@ -159,7 +159,7 @@ abcdefghijklmnop
 
 
 Paste that in your .env as:
-
+```
 EMAIL_PASSWORD=abcdefghijklmnop
 ```
 
